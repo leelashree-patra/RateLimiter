@@ -2,10 +2,6 @@ package org.example.ratelimiter.gateway.config;
 
 import java.time.Duration;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.bucket4j.caffeine.CaffeineProxyManager;
-import io.github.bucket4j.distributed.proxy.AsyncProxyManager;
-
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -13,11 +9,13 @@ import org.springframework.context.annotation.Configuration;
 public class RateLimitBackendConfig {
 
     @Bean
-    public AsyncProxyManager<String> rateLimitProxyManager() {
-        return new CaffeineProxyManager<String>(
-                Caffeine.newBuilder().maximumSize(10_000),
-                Duration.ofMinutes(5))
-                .asAsync();
+    public SlidingWindowCounter minuteWindowCounter() {
+        return new SlidingWindowCounter(Duration.ofMinutes(1));
+    }
+
+    @Bean
+    public SlidingWindowCounter dayWindowCounter() {
+        return new SlidingWindowCounter(Duration.ofDays(1));
     }
 
 }
