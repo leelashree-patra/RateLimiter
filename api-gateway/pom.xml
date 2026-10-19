@@ -28,8 +28,19 @@
         </dependency>
 
         <!-- Bucket4jFilterFunctions.rateLimit(...) looks up an AsyncProxyManager bean at request
-             time; bucket4j-core only ships abstract proxy-manager scaffolding, so an in-memory
-             backend (Caffeine) must be added explicitly and exposed as that bean. -->
+             time; bucket4j-core only ships abstract proxy-manager scaffolding, so a concrete
+             backend must be added explicitly and exposed as that bean. RateLimitBackendConfig
+             tries Redis (Lettuce) first for cross-instance limits, falling back to in-memory
+             Caffeine if Redis isn't reachable. -->
+        <dependency>
+            <groupId>com.bucket4j</groupId>
+            <artifactId>bucket4j_jdk17-lettuce</artifactId>
+            <version>8.15.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.bucket4j</groupId>
             <artifactId>bucket4j_jdk17-caffeine</artifactId>
