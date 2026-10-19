@@ -6,13 +6,9 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.example.orderservice.entity.Order;
+import org.example.orderservice.dto.Order;
 import org.springframework.stereotype.Component;
 
-/**
- * In-memory order storage. No persistence layer is wired up yet; this is enough to give
- * api-gateway something real to proxy and rate-limit against.
- */
 @Component
 public class OrderStore {
 

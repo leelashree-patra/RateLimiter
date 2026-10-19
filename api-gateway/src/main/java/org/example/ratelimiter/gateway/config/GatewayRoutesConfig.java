@@ -18,23 +18,13 @@ import org.springframework.web.servlet.function.RequestPredicates;
 import org.springframework.web.servlet.function.RouterFunction;
 import org.springframework.web.servlet.function.ServerResponse;
 
-/**
- * Routes {@code /orders/**} through to order-service, rate-limited per client by the gateway's
- * built-in Bucket4j filter. Two tiers apply, mapped onto order-service by sensitivity rather than
- * uniformly: a loose limit for browsing ({@code GET}) and a strict one for placing an order
- * ({@code POST}, the checkout-equivalent action here) — real e-commerce APIs generally don't rate
- * limit every route the same way. Each tier is its own Bucket4j bucket (see
- * {@link RateLimitKeyResolver}), so exhausting one doesn't affect the other; within a tier, two
- * bandwidths apply at once (a short per-minute cap and a longer per-day quota) and a request is
- * let through only if both still have capacity.
- */
 @Configuration
 public class GatewayRoutesConfig {
 
     @Bean
     public RouterFunction<ServerResponse> browseOrdersRoute(
             @Value("${gateway.order-service.uri}") String orderServiceUri,
-            @Value("${gateway.rate-limit.browse.per-minute.capacity:60}") long perMinuteCapacity,
+            @Value("${gateway.rate-limit.browse.per-minute.capacity:20}") long perMinuteCapacity,
             @Value("${gateway.rate-limit.browse.per-day.capacity:2000}") long perDayCapacity) {
         return tieredRoute("browse", RequestPredicates.GET("/orders/**"), orderServiceUri,
                 perMinuteCapacity, perDayCapacity);

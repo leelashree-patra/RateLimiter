@@ -1,4 +1,4 @@
-package org.example.orderservice.entity;
+package org.example.orderservice.dto;
 
 public record Order(Long id, String item, int quantity, String status) {
 }

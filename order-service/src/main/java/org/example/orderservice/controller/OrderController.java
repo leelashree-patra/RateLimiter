@@ -2,7 +2,7 @@ package org.example.orderservice.controller;
 
 import java.util.Collection;
 
-import org.example.orderservice.entity.Order;
+import org.example.orderservice.dto.Order;
 import org.example.orderservice.store.OrderStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
