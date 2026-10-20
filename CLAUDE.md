@@ -33,8 +33,8 @@ Maven multi-module reactor, Spring Boot 4.1.1 / Java 17, root `pom.xml` is `pack
 
 - **`api-gateway`** — the gateway. Routes `/orders/**` to `order-service` in two sensitivity tiers,
   each rate-limited independently (below). `ApiGatewayApplication` (boot entrypoint) sits in
-  `org.example.ratelimiter.gateway`; `GatewayRoutesConfig`, `RateLimitBackendConfig`, and
-  `RateLimitKeyResolver` are in its `.config` sub-package.
+  `org.example.ratelimiter.gateway`; `GatewayRoutesConfig`, `RateLimitBackendConfig`,
+  `RateLimitKeyResolver`, and `SlidingWindowCounter` are in its `.config` sub-package.
 - **`order-service`** — the backend being proxied to (`org.example.orderservice`), split into
   `entity` (`Order` record), `store` (`OrderStore`, in-memory `ConcurrentHashMap`, no persistence
   dependency), and `controller` (`OrderController`: `GET /orders`, `GET /orders/{id}`, `POST /orders`).
@@ -47,7 +47,7 @@ built on Spring MVC's functional endpoints — **not** `RouteLocatorBuilder`, `G
 `GlobalFilter`, `KeyResolver`, or anything returning `Mono`/`Flux`. Most Spring Cloud Gateway material
 online targets the reactive server and will not compile here.
 
-`GatewayRoutesConfig.tieredRoute` shows the pattern used throughout this module:
+`GatewayRoutesConfig.slidingWindowRoute` shows the pattern used throughout this module:
 `GatewayRouterFunctions.route(name).route(predicate, HandlerFunctions.http())` builds the
 `RouterFunction<ServerResponse>` bean; `HandlerFunctions.http()` is a generic proxying handler that
 reads its target URI from a request attribute, so it's always paired with a
@@ -58,59 +58,58 @@ prefix (note `server.webmvc`, not the older `spring.cloud.gateway.routes`), but 
 the Java `RouterFunction` bean style — stay consistent with that rather than mixing in properties-based
 routes.
 
-### Rate limiting: two tiers, each with two Bucket4j bandwidths, on a Redis-primary/Caffeine-fallback store
+### Rate limiting: a hand-rolled sliding-window counter, stored in Redis, Redis embedded by default
 
-The rate limit is `Bucket4jFilterFunctions.rateLimit(Consumer<RateLimitConfig>)`. It's applied
-**twice**, once per `GatewayRoutesConfig` route — `browseOrdersRoute` (`GET /orders/**`, loose:
-`gateway.rate-limit.browse.*`) and `checkoutOrdersRoute` (`POST /orders/**`, strict:
-`gateway.rate-limit.checkout.*`) — because real e-commerce APIs don't apply one uniform limit
-everywhere; placing an order is far more sensitive than browsing them. Both go through the shared
-`tieredRoute(tier, predicate, ...)` helper.
+There's no rate-limiting *library* here — the limiter is `SlidingWindowCounter`, applied from a
+plain `HandlerFilterFunction` lambda in `GatewayRoutesConfig.slidingWindowRoute`, used **twice**,
+once per route — `browseOrdersRoute` (`GET /orders/**`, loose: `gateway.rate-limit.browse.*`) and
+`checkoutOrdersRoute` (`POST /orders/**`, strict: `gateway.rate-limit.checkout.*`) — because real
+e-commerce APIs don't apply one uniform limit everywhere; placing an order is far more sensitive
+than browsing them.
 
-Within each tier, two bandwidths apply at once (per-minute **and** per-day). `RateLimitConfig`'s
-plain `setCapacity`/`setPeriod` only produce a single bandwidth, so instead
-`config.setConfigurationBuilder(...)` is overridden to build a `BucketConfiguration` with **two**
-`Bandwidth.classic(capacity, Refill.greedy(capacity, period))` entries via
-`BucketConfiguration.builder().addLimit(...).addLimit(...)`. Bucket4j treats multiple bandwidths on
-one bucket as AND: a request only succeeds if every bandwidth still has tokens. (`setCapacity`/
-`setPeriod` are ignored once `setConfigurationBuilder` is set.)
+**The algorithm**: time is split into fixed `windowSize` buckets, and a request is judged against a
+weighted blend of the current and previous bucket (`previousCount * (1 - elapsedFraction) +
+currentCount`) rather than a hard reset at each boundary (which would let a client burst up to 2x
+its limit around a boundary) or an exact per-request log (which needs one stored entry per request
+— doesn't scale for large volumes, which is why this is a *counter*, not a *log*). This needs
+exactly two counters per key regardless of traffic.
 
-**Keys are tier-scoped, not just client-scoped.** `RateLimitKeyResolver.forTier(tier)` resolves each
-request's identity (an `X-User-Id` header when the caller sends one, else client IP — see its
-Javadoc) and prefixes it with the tier name: `"browse:ip:1.2.3.4"` vs `"checkout:ip:1.2.3.4"`. Without
-that prefix the two tiers would collide on one Bucket4j bucket per client, and whichever tier's
-request created it first would silently fix its capacity/period for both — confirmed manually (see
-below) that a client's checkout bucket exhausting doesn't touch their browse bucket.
+**Where it's stored**: Redis, via one small Lua script run through Lettuce's `eval()` — no
+rate-limiting library needed, since the whole check-and-increment runs as a single atomic operation
+on the Redis server (Redis's single-threaded script execution gives atomicity for free; no
+client-side CAS retry loop needed, unlike a local-storage version of the same algorithm). The script
+(in `SlidingWindowCounter`) does `GET` current+previous, computes the estimate, and only if it's
+under capacity does `INCR` the current bucket and `EXPIRE` it — mirroring Caffeine's
+`expireAfterWrite` auto-eviction. The returned Lua table (`{allowed, remaining}`) arrives in Java as
+`List<Object>` of `Long`s via `ScriptOutputType.MULTI`.
 
-Two non-obvious things this filter requires, both wired in `RateLimitBackendConfig`:
+**Embedded Redis by default — no Docker, no Redis install needed to run this project.**
+`RateLimitBackendConfig.embeddedRedisServer` starts `com.github.fppt:jedis-mock`, a pure-JVM
+reimplementation of the Redis protocol (Netty + `luaj` for Lua/`EVAL` support) — **not** a real
+`redis-server` binary. That distinction mattered here: `it.ozimov:embedded-redis` (which *does*
+spawn a real binary) was checked first and ships only Linux/macOS executables, no Windows one, so
+it's a dead end on a Windows dev box; `jedis-mock` has no OS dependency at all. Set
+`gateway.redis.embedded=false` to instead connect to a real external Redis at
+`gateway.redis.host`/`gateway.redis.port` — `jedis-mock` is a testing reimplementation, not
+production-grade, so real deployments should use that path.
 
-1. **Bucket4j itself isn't pulled in transitively.** The gateway's own dependency on it
-   (`FilterAutoConfiguration$Bucket4jFilterConfiguration` is `@ConditionalOnClass(io.github.bucket4j.BucketConfiguration)`)
-   is `optional`, so `com.bucket4j:bucket4j_jdk17-core` must be a direct dependency or the filter
-   silently never activates.
-2. **At request time the filter does `applicationContext.getBean(AsyncProxyManager.class)`** to get
-   bucket storage — and `bucket4j_jdk17-core` ships no concrete implementation of that, only abstract
-   scaffolding for distributed backends. `RateLimitBackendConfig.rateLimitProxyManager` provides one,
-   **trying Redis first and falling back to Caffeine**:
-   - Builds a Lettuce `RedisClient`/`StatefulRedisConnection` (`gateway.redis.host`/`port`, short
-     `gateway.redis.connect-timeout-ms` so a missing Redis fails fast) and wraps it via
-     `Bucket4jLettuce.casBasedBuilder(connection).build().asAsync()` (`bucket4j_jdk17-lettuce`) —
-     this is a real distributed backend: multiple `api-gateway` instances pointed at the same Redis
-     share buckets correctly.
-   - If that connection attempt throws (Redis unreachable), it logs a warning and falls back to the
-     original in-memory `CaffeineProxyManager` — so the project needs **no Docker/Redis install** to
-     run, at the cost of per-instance (not cross-instance) limits while on the fallback.
-   - `RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE)` matters: it's what makes the
-     connection's key type `String` (matching `RateLimitKeyResolver`'s output) — the simpler
-     `Bucket4jLettuce.casBasedBuilder(RedisClient)` overload fixes the key type to `byte[]` instead
-     and would break at runtime.
+**Two granularities per tier, checked as AND, on two separate Redis-backed counters.**
+`RateLimitBackendConfig` exposes `minuteWindowCounter`/`dayWindowCounter` beans (one
+`SlidingWindowCounter` per granularity, `@Qualifier`-disambiguated since both are the same type),
+shared by **both** tiers safely because `RateLimitKeyResolver.forTier(tier)` already prefixes every
+key with the tier name (`"browse:ip:1.2.3.4"` vs `"checkout:ip:1.2.3.4"`) — without that prefix the
+tiers would collide on one counter per client. `slidingWindowRoute` checks `minuteWindowCounter`
+first; only if that allows the request does it check `dayWindowCounter`. If the day check then
+rejects, `minuteWindowCounter.release(key)` gives the minute token back (a small, documented
+approximation: a concurrent request on the same key could briefly see a slightly inflated count
+between those two calls — acceptable since the algorithm is already an estimate).
 
-Verified manually (no Redis running in this environment, so on the Caffeine fallback — the startup
-log says which backend is active): 6 rapid `POST /orders` from one client succeed 5 times then 429
-(checkout's 5/minute), while `GET /orders` from that same client right after is unaffected (still
-200s against its own 60/minute bucket) — proving both the dual-bandwidth limit and the tier
-isolation. Response headers are tier-specific too (`X-RateLimit-browse-Remaining`,
-`X-RateLimit-checkout-Remaining`). The Redis path itself (`gateway.redis.host` pointed at a real
-Redis) is implemented and dependency/API-verified but **not** live-tested here — no Redis available
-in this sandbox; verify by checking the startup log says "Rate limiting backed by Redis" instead of
-the fallback warning.
+Verified manually, against the embedded Redis (startup log confirms: `Embedded Redis (jedis-mock)
+started on ...` / `Rate limiting backed by Redis at ... (embedded)`): 6 rapid `POST /orders` from one
+client succeed 5 times then 429 (checkout's 5/minute), while `GET /orders` from that same client
+right after is unaffected (still 200s against its own 60/minute counters) — proving both the
+dual-granularity limit and the tier isolation. Response headers are tier-specific too
+(`X-RateLimit-browse-Remaining`, `X-RateLimit-checkout-Remaining`). Also stress-tested with real
+concurrency (`xargs -P`) through the running app: 90 parallel requests at a 60/window cap landed
+exactly 60×200 + 30×429; 10 parallel at a 5/window cap landed exactly 5×201 + 5×429 — the Redis Lua
+script's atomicity holds under contention, not just sequentially.

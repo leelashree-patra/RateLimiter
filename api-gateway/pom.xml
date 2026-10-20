@@ -19,36 +19,20 @@
             <artifactId>spring-cloud-starter-gateway-server-webmvc</artifactId>
         </dependency>
 
-        <!-- Backs Bucket4jFilterFunctions.rateLimit(...); pinned to the version
-             spring-cloud-gateway-server-webmvc:5.0.3 itself depends on optionally. -->
-        <dependency>
-            <groupId>com.bucket4j</groupId>
-            <artifactId>bucket4j_jdk17-core</artifactId>
-            <version>8.15.0</version>
-        </dependency>
-
-        <!-- Bucket4jFilterFunctions.rateLimit(...) looks up an AsyncProxyManager bean at request
-             time; bucket4j-core only ships abstract proxy-manager scaffolding, so a concrete
-             backend must be added explicitly and exposed as that bean. RateLimitBackendConfig
-             tries Redis (Lettuce) first for cross-instance limits, falling back to in-memory
-             Caffeine if Redis isn't reachable. -->
-        <dependency>
-            <groupId>com.bucket4j</groupId>
-            <artifactId>bucket4j_jdk17-lettuce</artifactId>
-            <version>8.15.0</version>
-        </dependency>
+        <!-- SlidingWindowCounter talks to Redis directly via Lettuce (a hand-rolled Lua script,
+             no rate-limiting library needed). -->
         <dependency>
             <groupId>io.lettuce</groupId>
             <artifactId>lettuce-core</artifactId>
         </dependency>
+
+        <!-- Embedded (in-process, pure-JVM) Redis so this project needs no Docker/Redis install
+             to run - see RateLimitBackendConfig. gateway.redis.embedded=false opts out in favor
+             of a real external Redis. -->
         <dependency>
-            <groupId>com.bucket4j</groupId>
-            <artifactId>bucket4j_jdk17-caffeine</artifactId>
-            <version>8.15.0</version>
-        </dependency>
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
+            <groupId>com.github.fppt</groupId>
+            <artifactId>jedis-mock</artifactId>
+            <version>1.1.11</version>
         </dependency>
 
         <dependency>
